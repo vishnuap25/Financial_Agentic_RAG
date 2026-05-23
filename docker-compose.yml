@@ -1,0 +1,72 @@
+version: "3.9"
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: [ollama_data:/root/.ollama]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chromadb:
+    image: chromadb/chroma:latest
+    ports: ["8000:8000"]
+    volumes: [chroma_data:/chroma/chroma]
+    environment:
+      ANONYMIZED_TELEMETRY: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8000' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports: ["8080:8080"]
+    env_file: .env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+    volumes:
+      - uploads:/app/data/uploads
+    depends_on:
+      ollama:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mcp:
+    build: .
+    command: ["python", "-m", "src.mcp.server"]
+    env_file: .env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+    depends_on:
+      ollama:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    stdin_open: true
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+
+volumes:
+  chroma_data:
+  uploads:
+  redis_data:
+  ollama_data:
