@@ -1245,10 +1245,12 @@ The deploy scripts automate the entire deployment process with a single command.
 
 | Step | Action | Details |
 |------|--------|---------|
+| 0 | Install curl | Checks if curl is installed. If missing, auto-installs using the system package manager (apt/yum/brew on Linux/macOS, winget on Windows). |
 | 1 | Check `.env` | If `.env` doesn't exist, copies from `.env.example`. Exits with error if neither exists. |
 | 2 | Start infrastructure | Runs `docker compose up -d ollama chromadb redis`. These services are only started if not already running — they are never rebuilt or recreated. |
 | 3 | Rebuild application | Runs `docker compose up -d --build --force-recreate api mcp`. This rebuilds the Docker image and recreates the `api` and `mcp` containers every time, ensuring all code changes are deployed. |
 | 4 | Pull Ollama models | Reads `AGENT_LLM_MODEL` and `RAG_EMBEDDING_MODEL` from `.env`, checks if they exist in the Ollama container, and pulls them if missing. |
+| 5 | Verify services | Uses curl to hit each service endpoint and prints `[UP]` with the response or `[DOWN]` if unreachable. Redis is tested via `redis-cli ping`. |
 
 #### Why infrastructure services are not rebuilt
 
@@ -1285,27 +1287,30 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 ```
 === Financial Agentic RAG - Local Deploy ===
-[1/4] .env file exists.
-[2/4] Ensuring infrastructure services are running...
+[1/5] .env file exists.
+[2/5] Ensuring infrastructure services are running...
 [+] Running 3/3
- ✔ Container financial_agentic_rag-ollama-1    Running
- ✔ Container financial_agentic_rag-chromadb-1  Running
- ✔ Container financial_agentic_rag-redis-1     Running
-[3/4] Rebuilding and redeploying application services...
+  Container financial_agentic_rag-ollama-1    Running
+  Container financial_agentic_rag-chromadb-1  Running
+  Container financial_agentic_rag-redis-1     Running
+[3/5] Rebuilding and redeploying application services...
 [+] Building api
 [+] Running 2/2
- ✔ Container financial_agentic_rag-api-1  Started
- ✔ Container financial_agentic_rag-mcp-1  Started
-[4/4] Checking Ollama models...
+  Container financial_agentic_rag-api-1  Started
+  Container financial_agentic_rag-mcp-1  Started
+[4/5] Checking Ollama models...
   Waiting for Ollama to be ready...
-  ✓ LLM model 'llama3.1' already installed.
-  ✓ Embedding model 'nomic-embed-text' already installed.
+  [OK] LLM model 'llama3.1:8b' already installed.
+  [OK] Embedding model 'nomic-embed-text' already installed.
+[5/5] Verifying services...
+
+  API (http://localhost:8080/health): [UP] {"status":"healthy"}
+  Ollama (http://localhost:11434): [UP] Ollama is running
+  ChromaDB (http://localhost:8000/api/v1/heartbeat): [UP] {"nanosecond heartbeat":1234567890}
+  Redis (localhost:6379): [UP] PONG
 
 === Deployment complete ===
-API:      http://localhost:8080/health
-Docs:     http://localhost:8080/docs
-Ollama:   http://localhost:11434
-ChromaDB: http://localhost:8000
+API Docs: http://localhost:8080/docs
 ```
 
 #### Code: `local_deploy.sh`
@@ -1317,44 +1322,58 @@ set -e
 
 echo "=== Financial Agentic RAG - Local Deploy ==="
 
-# ── Step 1: Environment File ──────────────────────────────────────────────────
+# -- Step 1: Ensure curl is installed (needed for health checks)
+# curl is used at the end to verify all services are reachable.
+# Auto-installs using the appropriate package manager for the OS.
+if ! command -v curl &>/dev/null; then
+    echo "[0/5] Installing curl..."
+    if [ -f /etc/debian_version ]; then
+        sudo apt-get update && sudo apt-get install -y curl
+    elif [ -f /etc/redhat-release ]; then
+        sudo yum install -y curl
+    elif command -v brew &>/dev/null; then
+        brew install curl
+    else
+        echo "ERROR: curl not found and cannot auto-install. Please install curl manually."
+        exit 1
+    fi
+fi
+
+# -- Step 2: Environment file check
 # Check if .env exists. If not, copy from .env.example as a template.
 # The .env file is required for Docker Compose to inject config into containers.
 # If neither .env nor .env.example exist, exit with error — can't deploy without config.
 if [ ! -f ".env" ]; then
     if [ -f ".env.example" ]; then
         cp .env.example .env
-        echo "[1/4] Created .env from .env.example — please fill in your values."
+        echo "[1/5] Created .env from .env.example - please fill in your values."
     else
-        echo "[1/4] WARNING: No .env file found. Create one before running."
+        echo "[1/5] WARNING: No .env file found. Create one before running."
         exit 1
     fi
 else
-    echo "[1/4] .env file exists."
+    echo "[1/5] .env file exists."
 fi
 
-# ── Step 2: Infrastructure Services ──────────────────────────────────────────
-# Start ollama, chromadb, and redis ONLY if not already running.
+# -- Step 3: Start infrastructure services only if not already running
 # Docker Compose automatically skips containers that are already up.
 # These use pre-built images and store data in persistent volumes,
 # so we never rebuild or recreate them (avoids re-downloading models, losing embeddings, etc.)
-echo "[2/4] Ensuring infrastructure services are running..."
+echo "[2/5] Ensuring infrastructure services are running..."
 docker compose up -d ollama chromadb redis
 
-# ── Step 3: Application Services ─────────────────────────────────────────────
-# Rebuild and force-recreate api and mcp containers every time.
-# --build    = rebuilds the Docker image from Dockerfile (picks up code changes)
+# -- Step 4: Rebuild and redeploy application services (picks up code changes)
+# --build          = rebuilds the Docker image from Dockerfile (picks up code changes)
 # --force-recreate = stops and recreates containers even if config hasn't changed
 # This ensures every run deploys the latest source code.
-echo "[3/4] Rebuilding and redeploying application services..."
+echo "[3/5] Rebuilding and redeploying application services..."
 docker compose up -d --build --force-recreate api mcp
 
-# ── Step 4: Ollama Model Check ───────────────────────────────────────────────
-# Read AGENT_LLM_MODEL and RAG_EMBEDDING_MODEL from .env file.
+# -- Step 5: Read model names from .env and pull if missing
 # grep extracts the line, cut splits on '=', tr removes quotes and spaces.
 # Then check if each model is already installed in the ollama container.
 # If not installed, pull it. This avoids re-downloading ~5GB models on every deploy.
-echo "[4/4] Checking Ollama models..."
+echo "[4/5] Checking Ollama models..."
 
 LLM_MODEL=$(grep -E "^AGENT_LLM_MODEL=" .env | cut -d '=' -f2 | tr -d '"' | tr -d ' ')
 EMBED_MODEL=$(grep -E "^RAG_EMBEDDING_MODEL=" .env | cut -d '=' -f2 | tr -d '"' | tr -d ' ')
@@ -1374,9 +1393,9 @@ INSTALLED_MODELS=$(docker exec "$OLLAMA_CONTAINER" ollama list)
 # Check and pull LLM model if not present
 if [ -n "$LLM_MODEL" ]; then
     if echo "$INSTALLED_MODELS" | grep -q "$LLM_MODEL"; then
-        echo "  ✓ LLM model '$LLM_MODEL' already installed."
+        echo "  [OK] LLM model '$LLM_MODEL' already installed."
     else
-        echo "  ↓ Pulling LLM model '$LLM_MODEL'..."
+        echo "  [PULL] Pulling LLM model '$LLM_MODEL'..."
         docker exec "$OLLAMA_CONTAINER" ollama pull "$LLM_MODEL"
     fi
 fi
@@ -1384,19 +1403,52 @@ fi
 # Check and pull embedding model if not present
 if [ -n "$EMBED_MODEL" ]; then
     if echo "$INSTALLED_MODELS" | grep -q "$EMBED_MODEL"; then
-        echo "  ✓ Embedding model '$EMBED_MODEL' already installed."
+        echo "  [OK] Embedding model '$EMBED_MODEL' already installed."
     else
-        echo "  ↓ Pulling embedding model '$EMBED_MODEL'..."
+        echo "  [PULL] Pulling embedding model '$EMBED_MODEL'..."
         docker exec "$OLLAMA_CONTAINER" ollama pull "$EMBED_MODEL"
     fi
 fi
 
+# -- Step 6: Verify all services are running with curl
+# curl -sf = silent + fail on error (no output on failure, non-zero exit code)
+# Each service is tested against its health/status endpoint.
+# Redis has no HTTP endpoint so it is tested via redis-cli ping inside the container.
+echo "[5/5] Verifying services..."
+echo ""
+
+printf "  API (http://localhost:8080/health): "
+if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+    echo "[UP] $(curl -s http://localhost:8080/health)"
+else
+    echo "[DOWN]"
+fi
+
+printf "  Ollama (http://localhost:11434): "
+if curl -sf http://localhost:11434/ >/dev/null 2>&1; then
+    echo "[UP] $(curl -s http://localhost:11434/)"
+else
+    echo "[DOWN]"
+fi
+
+printf "  ChromaDB (http://localhost:8000/api/v1/heartbeat): "
+if curl -sf http://localhost:8000/api/v1/heartbeat >/dev/null 2>&1; then
+    echo "[UP] $(curl -s http://localhost:8000/api/v1/heartbeat)"
+else
+    echo "[DOWN]"
+fi
+
+# Redis has no HTTP endpoint — test using redis-cli inside the container
+printf "  Redis (localhost:6379): "
+if docker compose exec -T redis redis-cli ping 2>/dev/null | grep -q "PONG"; then
+    echo "[UP] PONG"
+else
+    echo "[DOWN]"
+fi
+
 echo ""
 echo "=== Deployment complete ==="
-echo "API:      http://localhost:8080/health"
-echo "Docs:     http://localhost:8080/docs"
-echo "Ollama:   http://localhost:11434"
-echo "ChromaDB: http://localhost:8000"
+echo "API Docs: http://localhost:8080/docs"
 ```
 
 #### Code: `local_deploy.ps1`
@@ -1407,44 +1459,53 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== Financial Agentic RAG - Local Deploy ==="
 
-# ── Step 1: Environment File ──────────────────────────────────────────────────
+# -- Step 1: Ensure curl is available (built-in on Windows 10+, fallback to winget)
+# curl is used at the end to verify all services are reachable.
+if (!(Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+    Write-Host "[0/5] Installing curl..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install curl.curl --accept-package-agreements --accept-source-agreements
+    } else {
+        Write-Host "ERROR: curl not found and winget unavailable. Please install curl manually."
+        exit 1
+    }
+}
+
+# -- Step 2: Environment file check
 # Check if .env exists. If not, copy from .env.example as a template.
 # The .env file is required for Docker Compose to inject config into containers.
 # If neither .env nor .env.example exist, exit with error — can't deploy without config.
 if (!(Test-Path ".env")) {
     if (Test-Path ".env.example") {
         Copy-Item ".env.example" ".env"
-        Write-Host "[1/4] Created .env from .env.example - please fill in your values."
+        Write-Host "[1/5] Created .env from .env.example - please fill in your values."
     } else {
-        Write-Host "[1/4] WARNING: No .env file found. Create one before running."
+        Write-Host "[1/5] WARNING: No .env file found. Create one before running."
         exit 1
     }
 } else {
-    Write-Host "[1/4] .env file exists."
+    Write-Host "[1/5] .env file exists."
 }
 
-# ── Step 2: Infrastructure Services ──────────────────────────────────────────
-# Start ollama, chromadb, and redis ONLY if not already running.
+# -- Step 3: Start infrastructure services only if not already running
 # Docker Compose automatically skips containers that are already up.
 # These use pre-built images and store data in persistent volumes,
 # so we never rebuild or recreate them (avoids re-downloading models, losing embeddings, etc.)
-Write-Host "[2/4] Ensuring infrastructure services are running..."
+Write-Host "[2/5] Ensuring infrastructure services are running..."
 docker compose up -d ollama chromadb redis
 
-# ── Step 3: Application Services ─────────────────────────────────────────────
-# Rebuild and force-recreate api and mcp containers every time.
-# --build    = rebuilds the Docker image from Dockerfile (picks up code changes)
+# -- Step 4: Rebuild and redeploy application services (picks up code changes)
+# --build          = rebuilds the Docker image from Dockerfile (picks up code changes)
 # --force-recreate = stops and recreates containers even if config hasn't changed
 # This ensures every run deploys the latest source code.
-Write-Host "[3/4] Rebuilding and redeploying application services..."
+Write-Host "[3/5] Rebuilding and redeploying application services..."
 docker compose up -d --build --force-recreate api mcp
 
-# ── Step 4: Ollama Model Check ───────────────────────────────────────────────
-# Read AGENT_LLM_MODEL and RAG_EMBEDDING_MODEL from .env file.
+# -- Step 5: Read model names from .env and pull if missing
 # Filter lines matching the variable name, then strip the key and quotes.
 # Then check if each model is already installed in the ollama container.
 # If not installed, pull it. This avoids re-downloading ~5GB models on every deploy.
-Write-Host "[4/4] Checking Ollama models..."
+Write-Host "[4/5] Checking Ollama models..."
 
 $envContent = Get-Content ".env"
 $llmModel = ($envContent | Where-Object { $_ -match "^AGENT_LLM_MODEL=" }) -replace "^AGENT_LLM_MODEL=", "" -replace '"', ""
@@ -1466,9 +1527,9 @@ $installedModels = docker exec $ollamaContainer ollama list
 # Check and pull LLM model if not present
 if ($llmModel) {
     if ($installedModels -match $llmModel) {
-        Write-Host "  ✓ LLM model '$llmModel' already installed."
+        Write-Host "  [OK] LLM model '$llmModel' already installed."
     } else {
-        Write-Host "  ↓ Pulling LLM model '$llmModel'..."
+        Write-Host "  [PULL] Pulling LLM model '$llmModel'..."
         docker exec $ollamaContainer ollama pull $llmModel
     }
 }
@@ -1476,19 +1537,52 @@ if ($llmModel) {
 # Check and pull embedding model if not present
 if ($embedModel) {
     if ($installedModels -match $embedModel) {
-        Write-Host "  ✓ Embedding model '$embedModel' already installed."
+        Write-Host "  [OK] Embedding model '$embedModel' already installed."
     } else {
-        Write-Host "  ↓ Pulling embedding model '$embedModel'..."
+        Write-Host "  [PULL] Pulling embedding model '$embedModel'..."
         docker exec $ollamaContainer ollama pull $embedModel
     }
 }
 
+# -- Step 6: Verify all services are running with curl
+# curl.exe is used explicitly to avoid PowerShell's built-in Invoke-WebRequest alias.
+# Each service is tested against its health/status endpoint.
+# Redis has no HTTP endpoint so it is tested via redis-cli ping inside the container.
+Write-Host "[5/5] Verifying services..."
+Write-Host ""
+
+try {
+    $apiResp = curl.exe -sf http://localhost:8080/health 2>$null
+    Write-Host "  API (http://localhost:8080/health): [UP] $apiResp"
+} catch {
+    Write-Host "  API (http://localhost:8080/health): [DOWN]"
+}
+
+try {
+    $ollamaResp = curl.exe -sf http://localhost:11434/ 2>$null
+    Write-Host "  Ollama (http://localhost:11434): [UP] $ollamaResp"
+} catch {
+    Write-Host "  Ollama (http://localhost:11434): [DOWN]"
+}
+
+try {
+    $chromaResp = curl.exe -sf http://localhost:8000/api/v1/heartbeat 2>$null
+    Write-Host "  ChromaDB (http://localhost:8000/api/v1/heartbeat): [UP] $chromaResp"
+} catch {
+    Write-Host "  ChromaDB (http://localhost:8000/api/v1/heartbeat): [DOWN]"
+}
+
+# Redis has no HTTP endpoint — test using redis-cli inside the container
+$redisResp = docker compose exec -T redis redis-cli ping 2>$null
+if ($redisResp -match "PONG") {
+    Write-Host "  Redis (localhost:6379): [UP] PONG"
+} else {
+    Write-Host "  Redis (localhost:6379): [DOWN]"
+}
+
 Write-Host ""
 Write-Host "=== Deployment complete ==="
-Write-Host "API:      http://localhost:8080/health"
-Write-Host "Docs:     http://localhost:8080/docs"
-Write-Host "Ollama:   http://localhost:11434"
-Write-Host "ChromaDB: http://localhost:8000"
+Write-Host "API Docs: http://localhost:8080/docs"
 ```
 
 #### Redeployment Behavior
@@ -1501,6 +1595,7 @@ Write-Host "ChromaDB: http://localhost:8000"
 | `api` | Rebuilt and recreated (code changes deployed) |
 | `mcp` | Rebuilt and recreated (code changes deployed) |
 | LLM models | Only pulled if missing |
+| Service verification | Always runs — prints [UP]/[DOWN] for each service |
 
 ---
 
