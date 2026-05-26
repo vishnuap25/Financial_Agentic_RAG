@@ -1056,7 +1056,49 @@ Inside Docker Compose, containers communicate using service names as hostnames:
 - `http://chromadb:8000` — Docker resolves `chromadb` to the container's internal IP
 - That's why `environment` overrides `OLLAMA_BASE_URL` from `http://localhost:11434` to `http://ollama:11434`
 
-### Step 10: Download Ollama Models
+### Step 10: View ChromaDB with Chroma Explorer
+
+[Chroma Explorer](https://www.chroma-explorer.com/) is a free browser-based UI for inspecting your ChromaDB collections, documents, and embeddings — no installation required.
+
+#### Prerequisites
+
+- ChromaDB container must be running (started in Step 9)
+- A modern web browser (Chrome, Firefox, Edge, Safari)
+
+#### How to Use
+
+1. Make sure your ChromaDB container is running:
+
+   ```bash
+   docker compose up -d chromadb
+   ```
+
+2. Open [https://www.chroma-explorer.com/](https://www.chroma-explorer.com/) in your browser
+
+3. Connect to your local ChromaDB instance:
+   - **Host**: `http://localhost`
+   - **Port**: `8000`
+   - Click **Connect**
+
+4. Browse your data:
+   - Select the `financial_docs` collection
+   - Inspect ingested document chunks, metadata, and IDs
+   - Run similarity searches directly from the UI
+
+#### What You Can Do
+
+| Feature | Description |
+|---------|-------------|
+| Browse collections | View all ChromaDB collections and document counts |
+| Inspect documents | See chunked text, metadata, and IDs stored after ingestion |
+| Query embeddings | Run similarity searches directly from the UI |
+| Debug ingestion | Verify documents were ingested correctly before running the agent |
+
+> **Note:** Chroma Explorer connects directly to your local ChromaDB over HTTP. Your data never leaves your machine.
+
+---
+
+### Step 11: Download Ollama Models
 
 After all containers are running and healthy, you need to pull the LLM and embedding models into the Ollama container.
 
@@ -1223,7 +1265,7 @@ Always verify that the model you download supports tools before using it in an a
 
 > **Note:** Using a model without tool support in an agentic workflow will result in the agent being unable to call tools, leading to plain text responses instead of structured actions.
 
-### Step 11: Local Deploy Scripts
+### Step 12: Local Deploy Scripts
 
 #### What are the deploy scripts?
 
